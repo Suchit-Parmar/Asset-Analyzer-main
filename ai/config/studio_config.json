@@ -1,0 +1,27 @@
+{
+  "dataset_id": "cse_cic_ids2018",
+  "architecture": "gcn",
+  "graph_strategy": "endpoint",
+  "graph_params": {
+    "strategy": "endpoint",
+    "directed": true,
+    "rows_per_graph": 500
+  },
+  "feature_set": {
+    "timestamp": true,
+    "packet_size": true,
+    "protocol": true,
+    "ports": true,
+    "flow_duration": true,
+    "tcp_flags": false
+  },
+  "hyperparameters": {
+    "learning_rate": 0.0005,
+    "hidden_dim": 64,
+    "max_rows": 20000,
+    "epochs": 50,
+    "early_stop_patience": 8,
+    "grad_clip": 5.0,
+    "use_amp": true
+  }
+}

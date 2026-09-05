@@ -1,0 +1,40 @@
+{
+  "id": "unsw_nb15",
+  "name": "TGNN \u00b7 unsw_nb15",
+  "dataset_id": "unsw_nb15",
+  "architecture": "gat",
+  "hidden_dim": 64,
+  "node_features": 16,
+  "graph_strategy": "temporal",
+  "graph_params": {
+    "strategy": "temporal",
+    "window_size": 30,
+    "window_overlap": 0.0,
+    "window_stride": 30
+  },
+  "feature_set": {
+    "node_feature_dim": 16,
+    "node_kind": "endpoint"
+  },
+  "trained_at": "2026-07-13T08:47:10.837425",
+  "metrics": {
+    "accuracy": 0.7931,
+    "f1": 0.8054,
+    "test_accuracy": 0.7931,
+    "test_f1": 0.778,
+    "macro_f1": 0.6029,
+    "roc_auc": 0.7039,
+    "best_epoch": 19,
+    "graph_stats": {
+      "num_snapshots": 200,
+      "avg_nodes": 162.82,
+      "avg_edges": 200.0,
+      "avg_density": 0.0066,
+      "avg_degree": 1.86
+    },
+    "training_time_sec": 43.3,
+    "inference_time_ms": 4.792
+  },
+  "file": "unsw_nb15.pt",
+  "size_bytes": 230927
+}

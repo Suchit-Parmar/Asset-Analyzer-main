@@ -1,0 +1,26 @@
+{
+  "id": "tgnn_model_cicids2017.backup",
+  "name": "TGNN \u00b7 cicids2017",
+  "dataset_id": "cicids2017",
+  "architecture": "gat",
+  "hidden_dim": 128,
+  "node_features": 16,
+  "graph_strategy": null,
+  "graph_params": null,
+  "feature_set": null,
+  "trained_at": "2026-07-12T08:53:45.675299",
+  "metrics": {
+    "accuracy": 0.4706,
+    "f1": 0.4183,
+    "test_accuracy": null,
+    "test_f1": null,
+    "macro_f1": null,
+    "roc_auc": null,
+    "best_epoch": null,
+    "graph_stats": null,
+    "training_time_sec": null,
+    "inference_time_ms": null
+  },
+  "file": "tgnn_model_cicids2017.backup.pt",
+  "size_bytes": 837685
+}

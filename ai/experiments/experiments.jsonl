@@ -1,0 +1,2 @@
+{"id": "48fdb4fe-2c88-4a0b-902c-f2c8eeb160e0", "recorded_at": "2026-07-13T09:35:58.212426", "git_commit": null, "dataset_id": "demo", "architecture": "gat", "metrics": {"test": {"accuracy": 0.9, "f1": 0.88}}}
+{"id": "c49bb6ce-e36d-4f85-933c-6336d194e872", "recorded_at": "2026-07-13T09:35:58.250115", "git_commit": null, "dataset_id": "demo", "architecture": "gcn", "metrics": {"test": {"accuracy": 0.92, "f1": 0.9}}}

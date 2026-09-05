@@ -1,0 +1,40 @@
+{
+  "id": "cse_cic_ids2018",
+  "name": "TGNN \u00b7 cse_cic_ids2018",
+  "dataset_id": "cse_cic_ids2018",
+  "architecture": "gat",
+  "hidden_dim": 64,
+  "node_features": 16,
+  "graph_strategy": "temporal",
+  "graph_params": {
+    "strategy": "temporal",
+    "window_size": 30,
+    "window_overlap": 0.0,
+    "window_stride": 30
+  },
+  "feature_set": {
+    "node_feature_dim": 16,
+    "node_kind": "endpoint"
+  },
+  "trained_at": "2026-07-13T08:55:07.458123",
+  "metrics": {
+    "accuracy": 0.9203,
+    "f1": 0.8923,
+    "test_accuracy": 0.9371,
+    "test_f1": 0.9142,
+    "macro_f1": 0.7843,
+    "roc_auc": 0.958,
+    "best_epoch": 22,
+    "graph_stats": {
+      "num_snapshots": 5000,
+      "avg_nodes": 1.22,
+      "avg_edges": 7.26,
+      "avg_density": 0.0295,
+      "avg_degree": 1.93
+    },
+    "training_time_sec": 356.82,
+    "inference_time_ms": 1.382
+  },
+  "file": "cse_cic_ids2018.pt",
+  "size_bytes": 231347
+}

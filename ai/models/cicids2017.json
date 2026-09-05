@@ -1,0 +1,40 @@
+{
+  "id": "cicids2017",
+  "name": "TGNN \u00b7 cicids2017",
+  "dataset_id": "cicids2017",
+  "architecture": "gat",
+  "hidden_dim": 64,
+  "node_features": 16,
+  "graph_strategy": "temporal",
+  "graph_params": {
+    "strategy": "temporal",
+    "window_size": 30,
+    "window_overlap": 0.0,
+    "window_stride": 30
+  },
+  "feature_set": {
+    "node_feature_dim": 16,
+    "node_kind": "endpoint"
+  },
+  "trained_at": "2026-07-13T08:48:03.781737",
+  "metrics": {
+    "accuracy": 1.0,
+    "f1": 1.0,
+    "test_accuracy": 0.9545,
+    "test_f1": 0.9343,
+    "macro_f1": 0.8148,
+    "roc_auc": 0.9818,
+    "best_epoch": 22,
+    "graph_stats": {
+      "num_snapshots": 148,
+      "avg_nodes": 308.77,
+      "avg_edges": 270.27,
+      "avg_density": 0.0031,
+      "avg_degree": 1.74
+    },
+    "training_time_sec": 36.12,
+    "inference_time_ms": 3.416
+  },
+  "file": "cicids2017.pt",
+  "size_bytes": 231093
+}

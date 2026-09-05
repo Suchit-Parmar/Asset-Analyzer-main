@@ -1,0 +1,95 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gnn-ids-postgres
+    environment:
+      POSTGRES_USER: gnn_ids
+      POSTGRES_PASSWORD: gnn_ids_secret
+      POSTGRES_DB: gnn_ids
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gnn_ids -d gnn_ids"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: gnn-ids-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ai:
+    build:
+      context: ./ai
+      dockerfile: Dockerfile
+    container_name: gnn-ids-ai
+    environment:
+      DATA_DIR: /app/data
+      MODEL_DIR: /app/models
+      DATABASE_URL: postgresql://gnn_ids:gnn_ids_secret@postgres:5432/gnn_ids
+    ports:
+      - "8000:8000"
+    volumes:
+      - ai_data:/app/data
+      - ai_models:/app/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gnn-ids-api
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      DATABASE_URL: postgresql://gnn_ids:gnn_ids_secret@postgres:5432/gnn_ids
+      REDIS_URL: redis://redis:6379
+      AI_SERVICE_URL: http://ai:8000
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-change-me-access-secret-min-32-chars-long!!}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change-me-refresh-secret-min-32-chars-long!!}
+      CORS_ORIGIN: http://localhost:5000
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ai:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:alpine
+    container_name: gnn-ids-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  redis_data:
+  ai_data:
+  ai_models:
