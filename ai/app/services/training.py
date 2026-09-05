@@ -284,6 +284,9 @@ class TrainingService:
             graph_config = graph_config or GraphConfig.from_dict(
                 DEFAULT_STRATEGY, {"window_size": window_seconds}
             )
+            use_amp = bool(torch.cuda.is_available())
+            grad_clip = 5.0
+            early_stop_patience = 8
             print(f"[train] Device: {self.device}")
             print(f"[train] Dataset: {dataset_id} | architecture={architecture} | epochs={epochs}")
             print(f"[train] Graph strategy: {graph_config.strategy} | params={graph_config.to_metadata()}")
@@ -326,25 +329,7 @@ class TrainingService:
                 f"avg degree={graph_stats['avg_degree']:.2f}"
             )
 
-            # Representative split. The source CSVs are label-ordered, so a plain
-            # chronological tail split makes the validation set a single attack
-            # class (e.g. all DoS) — that collapses every validation metric to a
-            # meaningless 0 or 1. Interleaving every 5th snapshot into validation
-            # is deterministic and lets both sets span all classes/time windows.
-            # Deterministic 70/15/15 train / validation / test split. Interleaving
-            # by index (rather than a chronological tail) keeps every class and
-            # time window represented in all three splits — important because the
-            # snapshot count is small and time-ordered. The test split is held out
-            # entirely from training/model-selection for an unbiased final score.
-            if len(labeled) < 7:
-                train_snaps = labeled
-                val_snaps = labeled[-1:]
-                test_snaps = labeled[-1:]
-            else:
-                test_snaps = [s for i, s in enumerate(labeled) if i % 7 == 0]
-                val_snaps = [s for i, s in enumerate(labeled) if i % 7 == 1]
-                train_snaps = [s for i, s in enumerate(labeled) if i % 7 not in (0, 1)]
-
+            # Inspect label distribution across ALL ordered snapshots before splitting.
             def _class_spread(snaps: list[dict[str, Any]]) -> dict[str, int]:
                 counts: dict[str, int] = {}
                 for s in snaps:
@@ -353,12 +338,67 @@ class TrainingService:
                     counts[key] = counts.get(key, 0) + 1
                 return counts
 
+            full_spread = _class_spread(labeled)
+            print(f"[train] Full snapshot class distribution ({len(labeled)} snaps): {full_spread}")
+
+            # Prefer chronological 70/15/15 only when later slices have adequate
+            # multi-class coverage AND test classes largely appear in train
+            # (CICIDS day-file order otherwise shifts val=Brute / test=DoS).
+            test_indices: set[int] = set()
+            if len(labeled) < 7:
+                train_snaps = labeled
+                val_snaps = labeled[-1:]
+                test_snaps = labeled[-1:]
+                test_indices = {len(labeled) - 1}
+                split_mode = "tiny_fallback"
+            else:
+                n = len(labeled)
+                t1, t2 = int(n * 0.70), int(n * 0.85)
+                chrono_train = labeled[:t1]
+                chrono_val = labeled[t1:t2]
+                chrono_test = labeled[t2:]
+
+                def _classes(snaps: list[dict[str, Any]]) -> set[int]:
+                    return {self._snapshot_labels(s)[0] for s in snaps}
+
+                train_c = _classes(chrono_train)
+                val_c = _classes(chrono_val)
+                test_c = _classes(chrono_test)
+                # Require every test class to appear in train; otherwise CICIDS
+                # day-ordering puts DoS-only tails in test while train never sees them.
+                overlap = (len(test_c & train_c) / max(len(test_c), 1)) if test_c else 0.0
+                chrono_ok = (
+                    len(chrono_val) >= 2
+                    and len(chrono_test) >= 2
+                    and len(val_c) >= 2
+                    and len(test_c) >= 2
+                    and test_c.issubset(train_c)
+                    and len(train_c) >= 3
+                )
+                print(
+                    f"[train] Chrono probe: train_classes={len(train_c)} "
+                    f"val_classes={len(val_c)} test_classes={len(test_c)} "
+                    f"test∩train={overlap:.2f} -> {'use chrono' if chrono_ok else 'fallback interleaved'}"
+                )
+
+                if chrono_ok:
+                    train_snaps, val_snaps, test_snaps = chrono_train, chrono_val, chrono_test
+                    test_indices = set(range(t2, n))
+                    split_mode = "chronological"
+                else:
+                    test_snaps = [s for i, s in enumerate(labeled) if i % 7 == 0]
+                    val_snaps = [s for i, s in enumerate(labeled) if i % 7 == 1]
+                    train_snaps = [s for i, s in enumerate(labeled) if i % 7 not in (0, 1)]
+                    test_indices = {i for i in range(n) if i % 7 == 0}
+                    split_mode = "interleaved_class_balance"
+
             print(
-                f"[train] Split 70/15/15 -> train={len(train_snaps)} "
+                f"[train] Split 70/15/15 ({split_mode}) -> train={len(train_snaps)} "
                 f"val={len(val_snaps)} test={len(test_snaps)}"
             )
-            print(f"[train] Val class spread:  {_class_spread(val_snaps)}")
-            print(f"[train] Test class spread: {_class_spread(test_snaps)}")
+            print(f"[train] Train class spread: {_class_spread(train_snaps)}")
+            print(f"[train] Val class spread:   {_class_spread(val_snaps)}")
+            print(f"[train] Test class spread:  {_class_spread(test_snaps)}")
 
             model = TGNNModel(
                 node_features=NODE_FEATURE_DIM,
@@ -372,9 +412,11 @@ class TrainingService:
             if init_from:
                 try:
                     src = MODEL_DIR / f"{_dataset_slug(init_from)}.pt"
+                    if init_from in ("tgnn_model", "active", "tgnn_model.pt"):
+                        src = MODEL_DIR / "tgnn_model.pt"
                     if not src.exists():
                         src = MODEL_DIR / f"{init_from}.pt"
-                    if not src.exists() and init_from.endswith(".pt"):
+                    if not src.exists() and str(init_from).endswith(".pt"):
                         src = MODEL_DIR / init_from
                     if src.exists():
                         prior = torch.load(src, map_location=self.device, weights_only=False)
@@ -530,6 +572,33 @@ class TrainingService:
             inference_time_ms = round(
                 (time.perf_counter() - inf_start) / max(len(test_snaps), 1) * 1000.0, 3
             )
+            next_window_eval = self._evaluate_next_window(
+                model,
+                labeled,
+                target_indices=test_indices if test_indices else None,
+            )
+            # Attach detection-split class spreads for the report (honest imbalance).
+            split_meta = {
+                "ratio": "70/15/15",
+                "mode": split_mode,
+                "train": len(train_snaps),
+                "val": len(val_snaps),
+                "test": len(test_snaps),
+                "full_class_distribution": full_spread,
+                "train_class_distribution": _class_spread(train_snaps),
+                "val_class_distribution": _class_spread(val_snaps),
+                "test_class_distribution": _class_spread(test_snaps),
+                "limitation": (
+                    None
+                    if split_mode == "chronological"
+                    else (
+                        "Chronological val/test lacked adequate class overlap with train "
+                        "(label-ordered CICIDS windows); interleaved split used for detection. "
+                        "Next-window metrics use temporal consecutive pairs whose target "
+                        "window is in the detection test index set."
+                    )
+                ),
+            }
 
             final_metrics = {
                 # Backward-compatible headline keys (validation, best epoch).
@@ -552,18 +621,25 @@ class TrainingService:
                 "num_snapshots": len(labeled),
                 "history": history,
                 # New research metrics (headline = held-out test split).
-                "split": {
-                    "ratio": "70/15/15",
-                    "train": len(train_snaps),
-                    "val": len(val_snaps),
-                    "test": len(test_snaps),
-                },
+                "split": split_meta,
                 "macro_f1": test_eval.get("macro_f1", 0.0),
                 "weighted_f1": test_eval.get("weighted_f1", 0.0),
                 "roc_auc": test_eval.get("roc_auc"),
                 "confusion_matrix": test_eval.get("confusion_matrix"),
                 "class_labels": list(ATTACK_TYPES),
                 "per_class": test_eval.get("per_class", {}),
+                "detection": {
+                    "accuracy": test_eval.get("accuracy", 0.0),
+                    "precision": test_eval.get("weighted_precision", 0.0),
+                    "recall": test_eval.get("weighted_recall", 0.0),
+                    "f1": test_eval.get("weighted_f1", 0.0),
+                    "macro_precision": test_eval.get("macro_precision", 0.0),
+                    "macro_recall": test_eval.get("macro_recall", 0.0),
+                    "macro_f1": test_eval.get("macro_f1", 0.0),
+                    "roc_auc": test_eval.get("roc_auc"),
+                    "confusion_matrix": test_eval.get("confusion_matrix"),
+                    "per_class": test_eval.get("per_class", {}),
+                },
                 "test": {
                     "accuracy": test_eval.get("accuracy", 0.0),
                     "precision": test_eval.get("weighted_precision", 0.0),
@@ -580,6 +656,8 @@ class TrainingService:
                     "macro_f1": val_eval.get("macro_f1", 0.0),
                     "roc_auc": val_eval.get("roc_auc"),
                 },
+                "next_window": next_window_eval,
+                "next_window_trained": bool(next_window_eval.get("pairs", 0) > 0),
                 # Graph strategy provenance + structure/timing (Module C).
                 "graph_strategy": graph_config.strategy,
                 "graph_params": graph_config.to_metadata(),
@@ -627,6 +705,11 @@ class TrainingService:
             print(f"[train] test_macro_f1  = {test_eval.get('macro_f1')}")
             print(f"[train] test_roc_auc   = {test_eval.get('roc_auc')}")
             print(f"[train] per_class      = {test_eval.get('per_class')}")
+            print(f"[train] --- next-window (t -> t+1) on TEST ---")
+            print(f"[train] next_stage_acc = {next_window_eval.get('stage_accuracy')}")
+            print(f"[train] next_stage_f1  = {next_window_eval.get('stage_f1')}")
+            print(f"[train] next_attack_acc= {next_window_eval.get('attack_accuracy')} (transfer probe)")
+            print(f"[train] next_pairs     = {next_window_eval.get('pairs')}")
             print(f"[train] graph_strategy = {graph_config.strategy} | params={graph_config.to_metadata()}")
             print(f"[train] training_time  = {training_time_sec}s | inference={inference_time_ms}ms/snapshot")
 
@@ -643,6 +726,7 @@ class TrainingService:
                 "graph_strategy": graph_config.strategy,
                 "graph_params": graph_config.to_metadata(),
                 "feature_set": final_metrics["feature_set"],
+                "next_window_trained": True,
                 "trained_at": datetime.utcnow().isoformat(),
             }
 
@@ -820,7 +904,8 @@ class TrainingService:
 
         context = torch.enable_grad() if train else torch.no_grad()
         with context:
-            for snap in snapshots:
+            prev_temporal: torch.Tensor | None = None
+            for idx, snap in enumerate(snapshots):
                 feats = snap.get("node_features") or []
                 if not feats:
                     continue
@@ -848,11 +933,25 @@ class TrainingService:
                 attack_label = torch.tensor([attack_idx], dtype=torch.long, device=self.device)
                 stage_label = torch.tensor([stage_idx], dtype=torch.long, device=self.device)
 
+                next_stage_idx: int | None = None
+                if idx + 1 < len(snapshots):
+                    _, next_stage_idx = self._snapshot_labels(snapshots[idx + 1])
+
                 with autocast(enabled=use_amp):
-                    outputs = model(x, ei)
+                    outputs = model(x, ei, temporal_seq=prev_temporal)
                     loss = attack_criterion(outputs["attack_logits"], attack_label) + stage_weight * stage_criterion(
                         outputs["stage_logits"], stage_label
                     )
+                    # Genuine next-window objective: predict stage of window t+1
+                    # from the embedding of window t (when a successor exists).
+                    if next_stage_idx is not None:
+                        next_label = torch.tensor([next_stage_idx], dtype=torch.long, device=self.device)
+                        loss = loss + 0.5 * stage_criterion(outputs["next_stage_logits"], next_label)
+
+                # Carry graph embedding as a 1-step temporal sequence for the GRU path.
+                with torch.no_grad():
+                    emb = outputs["node_embeddings"].mean(dim=0, keepdim=True).detach()
+                    prev_temporal = emb.unsqueeze(0)  # [1, 1, H]
 
                 if train:
                     # Gradient accumulation: batch-size-1 graph updates are very
@@ -948,6 +1047,98 @@ class TrainingService:
         return self._comprehensive_metrics(
             y_true, y_pred, np.asarray(probs) if probs else None
         )
+
+    def _evaluate_next_window(
+        self,
+        model: TGNNModel,
+        snapshots: list[dict[str, Any]],
+        *,
+        target_indices: set[int] | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate genuine t → t+1 prediction on consecutive ordered snapshots.
+
+        If ``target_indices`` is set, only pairs whose *target* window index
+        (t+1) is in that set are scored — so interleaved detection tests still
+        get temporally consecutive forecasting pairs.
+
+        - ``stage_*``: next_stage_classifier trained to forecast stage of window t+1
+        - ``attack_*``: transfer probe — current attack head vs label of t+1
+          (diagnostic only; not the trained next-window objective)
+        """
+        model.eval()
+        stage_true: list[int] = []
+        stage_pred: list[int] = []
+        attack_true: list[int] = []
+        attack_pred: list[int] = []
+        prev_temporal: torch.Tensor | None = None
+
+        with torch.no_grad():
+            for idx in range(len(snapshots) - 1):
+                snap = snapshots[idx]
+                nxt = snapshots[idx + 1]
+                score_pair = target_indices is None or (idx + 1) in target_indices
+
+                feats = snap.get("node_features") or []
+                if not feats:
+                    prev_temporal = None
+                    continue
+                x = torch.tensor(feats, dtype=torch.float32, device=self.device)
+                if x.size(0) == 0:
+                    prev_temporal = None
+                    continue
+                if x.size(1) != NODE_FEATURE_DIM:
+                    if x.size(1) < NODE_FEATURE_DIM:
+                        pad = torch.zeros(x.size(0), NODE_FEATURE_DIM - x.size(1), device=self.device)
+                        x = torch.cat([x, pad], dim=1)
+                    else:
+                        x = x[:, :NODE_FEATURE_DIM]
+                ei_data = snap.get("edge_index") or [[0], [0]]
+                if not ei_data[0]:
+                    ei = torch.tensor([[0], [0]], dtype=torch.long, device=self.device)
+                else:
+                    ei = torch.tensor(ei_data, dtype=torch.long, device=self.device)
+                    ei = ei.clamp(min=0, max=max(x.size(0) - 1, 0))
+
+                outputs = model(x, ei, temporal_seq=prev_temporal)
+                emb = outputs["node_embeddings"].mean(dim=0, keepdim=True)
+                prev_temporal = emb.unsqueeze(0)
+
+                if not score_pair:
+                    continue
+
+                _, next_stage = self._snapshot_labels(nxt)
+                next_attack, _ = self._snapshot_labels(nxt)
+                stage_true.append(next_stage)
+                stage_pred.append(int(outputs["next_stage_logits"].argmax(dim=-1).cpu().item()))
+                attack_true.append(next_attack)
+                attack_pred.append(int(outputs["attack_logits"].argmax(dim=-1).cpu().item()))
+
+        if not stage_true:
+            return {
+                "pairs": 0,
+                "stage_accuracy": None,
+                "stage_f1": None,
+                "attack_accuracy": None,
+                "attack_f1": None,
+                "note": "Insufficient consecutive snapshots for next-window evaluation",
+            }
+
+        return {
+            "pairs": len(stage_true),
+            "stage_accuracy": float(accuracy_score(stage_true, stage_pred)),
+            "stage_f1": float(f1_score(stage_true, stage_pred, average="weighted", zero_division=0)),
+            "attack_accuracy": float(accuracy_score(attack_true, attack_pred)),
+            "attack_f1": float(f1_score(attack_true, attack_pred, average="weighted", zero_division=0)),
+            "note": (
+                "stage_* = trained next_stage_classifier (t->t+1). "
+                "attack_* = transfer probe of current attack head vs t+1 label. "
+                + (
+                    "Pairs filtered to detection-test target indices."
+                    if target_indices is not None
+                    else "All consecutive pairs in provided sequence."
+                )
+            ),
+        }
 
     def _comprehensive_metrics(
         self,

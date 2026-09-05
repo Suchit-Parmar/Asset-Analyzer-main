@@ -38,6 +38,7 @@ WRONG_CICIDS_NAMES = {
 def test_endpoint_feature_names_length_and_order():
     assert len(ENDPOINT_FEATURE_NAMES) == 16
     assert ENDPOINT_FEATURE_NAMES[0] == "log_packets"
+    assert ENDPOINT_FEATURE_NAMES[3] == "log_auth_port_bursts"
     assert ENDPOINT_FEATURE_NAMES[7] == "conn_ratio"
     assert ENDPOINT_FEATURE_NAMES[8] == "reserved_9"
     assert ENDPOINT_FEATURE_NAMES[15] == "reserved_16"

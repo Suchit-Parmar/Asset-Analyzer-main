@@ -132,12 +132,15 @@ export default function Evaluation() {
 
   const handlePdfExport = async () => {
     try {
-      await api.downloadReport("html");
-      toast({ title: "PDF export", description: "Print-ready report opened — choose Save as PDF in the print dialog." });
+      await api.downloadReport("pdf");
+      toast({
+        title: "Report downloaded",
+        description: "evaluation-report.html saved. Use the print dialog → Save as PDF if you want a .pdf file.",
+      });
     } catch (err) {
       toast({
         title: "PDF export failed",
-        description: err instanceof Error ? err.message : "Could not open report",
+        description: err instanceof Error ? err.message : "Could not download report",
         variant: "destructive",
       });
     }

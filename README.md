@@ -40,12 +40,16 @@ set MODEL_DIR=..\ai\models
 set DATASET_ROOT=..\DataSet
 py -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
+# If port 8000 is already in use, run on 8001 and set AI_SERVICE_URL=http://127.0.0.1:8001 in .env
+
 # 4) Express + UI (new terminal)
 npm run dev
 ```
 
 Open http://localhost:5000  
-Login: `admin@gnn-ids.local` / `Admin@123456`
+Login (seeded admin; not shown on the login UI): `admin@gnn-ids.local` / `Admin@123456`
+
+**Live detection:** Network Graph → LIVE → select Wi‑Fi/Ethernet → Start. On Windows, install [Npcap](https://npcap.com/) and run with capture permissions if Start fails.
 
 ## Documentation index
 

@@ -37,13 +37,15 @@ def flows_to_dataframe(
             "dst_bytes": int(f.dst_bytes),
             "duration": float(f.duration),
             "hostname": hostname,
+            # Metadata only — never used as a model input feature.
+            "tcp_flags": int(f.tcp_flags or 0),
         })
 
     if not rows:
         return pd.DataFrame(columns=[
             "timestamp", "src_ip", "dst_ip", "src_port", "dst_port", "protocol",
             "src_packets", "dst_packets", "src_bytes", "dst_bytes", "duration",
-            "hostname",
+            "hostname", "tcp_flags",
         ])
 
     return pd.DataFrame(rows)

@@ -138,6 +138,10 @@ class InferenceService:
                 or metrics.get("graph_params"),
                 "feature_set": checkpoint.get("feature_set")
                 or metrics.get("feature_set"),
+                "next_window_trained": bool(
+                    checkpoint.get("next_window_trained")
+                    or metrics.get("next_window_trained")
+                ),
                 "model_path": str(self.model_path),
                 "model_size_bytes": self.model_path.stat().st_size,
                 "model_size_mb": round(self.model_path.stat().st_size / (1024 * 1024), 3),
@@ -224,7 +228,16 @@ class InferenceService:
 
         attack_type = attack_types[min(attack_idx, len(attack_types) - 1)]
         attack_stage = attack_stages[min(stage_idx, len(attack_stages) - 1)]
-        predicted_next_stage = attack_stages[min(next_stage_idx, len(attack_stages) - 1)]
+        next_window_trained = bool(self.metadata.get("next_window_trained"))
+        next_stage_confidence = float(np.max(next_stage_probs)) if len(next_stage_probs) else 0.0
+        if next_window_trained:
+            predicted_next_stage = attack_stages[min(next_stage_idx, len(attack_stages) - 1)]
+            next_method = "trained_next_stage_head"
+        else:
+            # Do not present the untrained next_stage head as model prediction.
+            predicted_next_stage = STAGE_TRANSITIONS.get(attack_stage, attack_stage)
+            next_method = "heuristic_stage_transition"
+            next_stage_confidence = None
         confidence = float(np.max(attack_probs))
         probability = float(np.max(stage_probs))
         threat_level = THREAT_LEVELS.get(attack_type, "medium")
@@ -235,6 +248,8 @@ class InferenceService:
 
         is_compromised = bool(len(compromise_prob) > 1 and compromise_prob[1] > 0.5)
         is_unknown = bool(confidence < UNKNOWN_CONFIDENCE)
+        detection_status = "BENIGN" if attack_type == "Normal" else "ATTACK"
+        risk_level = "LOW" if threat_level == "low" else threat_level.upper()
 
         # Explainable AI (Phase 12): top contributing features, graph statistics
         # and a plain-language reasoning summary for every prediction.
@@ -265,10 +280,34 @@ class InferenceService:
                 attack_stages[i]: round(float(stage_probs[i]), 4)
                 for i in range(min(len(stage_probs), len(attack_stages)))
             },
+            # Explicit separation: current-window detection vs next-window forecast.
+            "detection": {
+                "status": detection_status,
+                "attack_type": attack_type,
+                "confidence": round(confidence, 4),
+                "risk_level": risk_level,
+                "attack_stage": attack_stage,
+            },
+            "next_window_prediction": {
+                "enabled": next_window_trained,
+                "predicted_stage": predicted_next_stage,
+                "confidence": (
+                    round(next_stage_confidence, 4)
+                    if next_stage_confidence is not None
+                    else None
+                ),
+                "method": next_method,
+                "note": (
+                    "Trained t→t+1 stage forecast from temporal graph windows."
+                    if next_window_trained
+                    else "Checkpoint has no trained next-window head; heuristic stage transition only."
+                ),
+            },
             "model": {
                 "architecture": self.metadata.get("architecture"),
                 "dataset_id": self.metadata.get("dataset_id"),
                 "trained_at": self.metadata.get("trained_at"),
+                "next_window_trained": next_window_trained,
             },
             "explanation": {
                 "node_importance": node_importance,
@@ -279,6 +318,10 @@ class InferenceService:
                 "predicted_progression": f"{attack_stage} -> {predicted_next_stage}",
                 "expected_next": STAGE_TRANSITIONS.get(attack_stage, attack_stage),
                 "reasoning": reasoning,
+                "important_indicators": [
+                    f"{f['feature']} (importance={f['importance']})"
+                    for f in top_features[:3]
+                ],
             },
         }
 
@@ -376,23 +419,27 @@ class InferenceService:
                 masked = [mask_vector(row, fs, kind=kind) for row in x.detach().cpu().tolist()]
                 x = torch.tensor(masked, dtype=torch.float32, device=self.device)
         else:
+            # Flat-feature fallback aligned with endpoint feature layout (not CICIDS tabular).
+            packets = float(
+                features.get("src_packets", features.get("spkts", 1)) or 1
+            ) + float(features.get("dst_packets", features.get("dpkts", 1)) or 1)
+            nbytes = float(
+                features.get("src_bytes", features.get("sbytes", 0)) or 0
+            ) + float(features.get("dst_bytes", features.get("dbytes", 0)) or 0)
+            connections = float(features.get("count", features.get("ct_srv_src", 1)) or 1)
+            auth_bursts = float(features.get("num_failed_logins", features.get("auth_port_bursts", 0)) or 0)
+            port_count = float(features.get("dst_port", 0) or 0) > 0
+            avg_bytes = nbytes / max(packets, 1.0)
             feat_vec = [
-                float(features.get("duration", 0) or 0),
-                float(features.get("src_bytes", features.get("sbytes", 0)) or 0),
-                float(features.get("dst_bytes", features.get("dbytes", 0)) or 0),
-                float(features.get("src_packets", features.get("spkts", 1)) or 1),
-                float(features.get("dst_packets", features.get("dpkts", 1)) or 1),
-                float(features.get("num_failed_logins", 0) or 0),
-                float(features.get("count", features.get("ct_srv_src", 1)) or 1),
-                float(features.get("srv_count", features.get("ct_srv_dst", 1)) or 1),
-                float(features.get("serror_rate", 0) or 0),
-                float(features.get("same_srv_rate", 0.5) or 0.5),
-                float(features.get("dst_host_count", 50) or 50),
-                float(hash(str(features.get("protocol", "tcp"))) % 100),
-                float(hash(str(features.get("service", "http"))) % 100),
-                float(features.get("logged_in", 0) or 0),
-                float(features.get("num_compromised", 0) or 0),
-                float(features.get("root_shell", 0) or 0),
+                float(np.log1p(packets)),
+                float(np.log1p(nbytes)),
+                float(np.log1p(connections)),
+                float(np.log1p(auth_bursts)),
+                float(np.log1p(1.0 if port_count else 0.0)),
+                1.0,  # default host node type
+                float(np.log1p(avg_bytes)),
+                float(min(connections / 10.0, 1.0)),
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             ]
             if len(feat_vec) < expected_dim:
                 feat_vec.extend([0.0] * (expected_dim - len(feat_vec)))

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.graph.builder import TemporalGraphBuilder
-from app.live.capture import LiveCapture, list_interfaces
+from app.live.capture import LiveCapture, list_interfaces, validate_interface_name
 from app.live.feature_extractor import flows_to_dataframe
 from app.live.flow_processor import FlowAggregator
 
@@ -64,7 +64,8 @@ class LiveManager:
                 "error": self._error or self._capture.last_error,
                 "model_loaded": self._model_loaded(),
                 "stats": {
-                    "packets": self._total_packets + self._capture.packet_count,
+                    # packet_count is cumulative captured; do not add drained totals again.
+                    "packets": int(self._capture.packet_count),
                     "flows": self._total_flows,
                     "active_nodes": int(snap.get("node_count") or 0) if snap else 0,
                     "connections": int(snap.get("edge_count") or 0) if snap else 0,
@@ -82,8 +83,14 @@ class LiveManager:
         window_seconds = int(window_seconds)
         if window_seconds not in _ALLOWED_WINDOWS:
             raise ValueError(f"window_seconds must be one of {sorted(_ALLOWED_WINDOWS)}")
-        if not interface or not str(interface).strip():
-            raise ValueError("interface is required")
+
+        # Validate against real NIC list BEFORE taking the lock-held start path.
+        iface = validate_interface_name(str(interface))
+        iface_meta = next((i for i in list_interfaces() if i.get("name") == iface), None)
+        if iface_meta is not None and iface_meta.get("is_up") is False:
+            raise ValueError(
+                f"Interface '{iface}' is down / not operational. Select an active interface."
+            )
 
         with self._lock:
             if self._capture.running:
@@ -91,7 +98,7 @@ class LiveManager:
 
             self._error = None
             self._window_seconds = window_seconds
-            self._iface = str(interface).strip()
+            self._iface = iface
             self._aggregator = FlowAggregator()
             self._windows.clear()
             self._latest = None

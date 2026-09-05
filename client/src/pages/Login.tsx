@@ -18,8 +18,8 @@ type AuthTab = "signin" | "signup";
 
 export default function Login({ onLogin }: { onLogin: () => void }) {
   const [activeTab, setActiveTab] = useState<AuthTab>("signin");
-  const [signInEmail, setSignInEmail] = useState("admin@gnn-ids.local");
-  const [signInPassword, setSignInPassword] = useState("Admin@123456");
+  const [signInEmail, setSignInEmail] = useState("");
+  const [signInPassword, setSignInPassword] = useState("");
   const [signUpName, setSignUpName] = useState("");
   const [signUpEmail, setSignUpEmail] = useState("");
   const [signUpPassword, setSignUpPassword] = useState("");
@@ -170,14 +170,6 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
                   <Fingerprint className="h-5 w-5 text-cyan-300" />
                   <div className="font-mono text-sm uppercase tracking-[0.16em] text-slate-100">Live WS</div>
                   <p className="text-sm leading-6 text-slate-300">WebSocket uses the same access token.</p>
-                </div>
-              </div>
-
-              <div className="panel-subtle space-y-3 p-5">
-                <div className="font-mono text-sm uppercase tracking-[0.16em] text-slate-100">Seeded Admin</div>
-                <div className="rounded-2xl border border-white/8 bg-black/20 p-4 text-sm text-slate-200">
-                  <div>Email: <span className="font-mono text-cyan-200">admin@gnn-ids.local</span></div>
-                  <div>Password: <span className="font-mono text-cyan-200">Admin@123456</span></div>
                 </div>
               </div>
             </div>

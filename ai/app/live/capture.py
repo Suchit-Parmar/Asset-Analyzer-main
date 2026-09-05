@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import threading
 from collections import deque
@@ -12,8 +13,11 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
-# Bound memory: keep a rolling buffer of recent raw packet summaries.
+# Bound memory: keep a rolling buffer of recent raw packet summaries (no payloads).
 _MAX_PACKET_BUFFER = 50_000
+
+# Reject shell / path metacharacters in interface names (never shell out).
+_UNSAFE_IFACE_CHARS = re.compile(r"[;|&$`<>\n\r\"'\\]")
 
 
 @dataclass
@@ -26,10 +30,26 @@ class PacketEvent:
     protocol: str
     length: int
     dns_name: str | None = None
+    tcp_flags: int | None = None  # raw TCP flags byte when available
+
+
+def _is_ipv4_family(family: Any) -> bool:
+    if family == socket.AF_INET:
+        return True
+    try:
+        if int(family) == int(socket.AF_INET):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(family).endswith("AF_INET") and "AF_INET6" not in str(family)
 
 
 def list_interfaces() -> list[dict[str, Any]]:
-    """Return authorized local NICs available for capture."""
+    """Return real local NICs available for capture (no fabricated names).
+
+    Uses psutil only. Scapy's Windows NIC enumerator is intentionally avoided here
+    because it can block under Npcap contention and stall interface APIs/tests.
+    """
     interfaces: list[dict[str, Any]] = []
     try:
         import psutil
@@ -37,28 +57,82 @@ def list_interfaces() -> list[dict[str, Any]]:
         addrs = psutil.net_if_addrs()
         stats = psutil.net_if_stats()
         for name, addr_list in addrs.items():
-            ipv4 = next((a.address for a in addr_list if getattr(a, "family", None) == socket.AF_INET), None)
+            ipv4 = next(
+                (
+                    a.address
+                    for a in addr_list
+                    if _is_ipv4_family(getattr(a, "family", None))
+                    and a.address
+                    and not str(a.address).startswith("127.")
+                ),
+                None,
+            )
+            if ipv4 is None:
+                ipv4 = next(
+                    (
+                        a.address
+                        for a in addr_list
+                        if _is_ipv4_family(getattr(a, "family", None))
+                    ),
+                    None,
+                )
             st = stats.get(name)
             interfaces.append({
                 "name": name,
                 "display_name": name,
                 "ipv4": ipv4,
-                "is_up": bool(st.isup) if st else True,
+                "is_up": bool(st.isup) if st else False,
                 "speed_mbps": int(st.speed) if st and st.speed else None,
             })
     except Exception as exc:
         logger.warning("psutil interface list failed: %s", exc)
 
-    if not interfaces:
-        # Minimal fallback so the UI can still show an option.
-        interfaces.append({
-            "name": "any",
-            "display_name": "Default (any)",
-            "ipv4": None,
-            "is_up": True,
-            "speed_mbps": None,
-        })
+    def _rank(i: dict[str, Any]) -> tuple:
+        name = str(i.get("name") or "")
+        name_l = f"{name} {i.get('display_name') or ''}".lower()
+        ipv4 = str(i.get("ipv4") or "")
+        loopback = ipv4.startswith("127.") or "loopback" in name_l
+        # Without Scapy descriptions, Host-Only NICs often appear as "Ethernet N"
+        # on 192.168.56.0/24 (VirtualBox default) — treat as virtual.
+        virtual = any(
+            k in name_l
+            for k in (
+                "virtualbox", "vmware", "hyper-v", "vbox", "virtual",
+                "teredo", "bluetooth", "wi-fi direct", "vpn", "host-only",
+            )
+        ) or ipv4.startswith("192.168.56.")
+        # Prefer common primary NIC names for default dropdown selection.
+        primary = name_l.strip() in ("wi-fi", "wifi", "wlan", "ethernet", "eth0", "en0")
+        return (
+            not bool(i.get("is_up")),
+            ipv4 == "" or ipv4.startswith("169.254."),
+            loopback,
+            virtual,
+            not primary,
+            name,
+        )
+
+    interfaces.sort(key=_rank)
     return interfaces
+
+
+def validate_interface_name(iface: str) -> str:
+    """Server-side validation: known NIC only, no shell metacharacters."""
+    name = (iface or "").strip()
+    if not name:
+        raise ValueError("interface is required")
+    if len(name) > 256:
+        raise ValueError("interface name too long")
+    if _UNSAFE_IFACE_CHARS.search(name):
+        raise ValueError("Invalid interface name")
+    # Disallow path traversal / absolute paths disguised as iface names.
+    if "/" in name or "\\" in name or ".." in name:
+        raise ValueError("Invalid interface name")
+
+    known = {str(i["name"]) for i in list_interfaces()}
+    if name not in known:
+        raise ValueError(f"Unknown or unavailable interface: {name}")
+    return name
 
 
 class LiveCapture:
@@ -116,6 +190,9 @@ class LiveCapture:
         self._error = None
         self._iface = iface
         self._packet_count = 0
+        self._dns_cache.clear()
+        with self._lock:
+            self._buffer.clear()
 
         def _handle(pkt) -> None:  # noqa: ANN001
             try:
@@ -132,10 +209,15 @@ class LiveCapture:
 
                 proto = "other"
                 sport = dport = 0
+                tcp_flags: int | None = None
                 if pkt.haslayer(TCP):
                     proto = "tcp"
                     sport = int(pkt[TCP].sport)
                     dport = int(pkt[TCP].dport)
+                    try:
+                        tcp_flags = int(pkt[TCP].flags)
+                    except Exception:
+                        tcp_flags = None
                 elif pkt.haslayer(UDP):
                     proto = "udp"
                     sport = int(pkt[UDP].sport)
@@ -146,7 +228,7 @@ class LiveCapture:
                 dns_name = None
                 if pkt.haslayer(DNS):
                     dns = pkt[DNS]
-                    # Passiveively observe DNS answers only (no active queries).
+                    # Passively observe DNS answers only (no active queries).
                     if getattr(dns, "an", None) is not None:
                         try:
                             for i in range(int(dns.ancount or 0)):
@@ -175,6 +257,7 @@ class LiveCapture:
                     protocol=proto,
                     length=length,
                     dns_name=dns_name,
+                    tcp_flags=tcp_flags,
                 )
                 with self._lock:
                     self._buffer.append(event)
@@ -189,8 +272,8 @@ class LiveCapture:
                 "prn": _handle,
                 "store": False,
             }
-            if iface and iface.lower() not in ("any", "default"):
-                kwargs["iface"] = iface
+            # Always bind to a concrete validated interface name (no "any" fake).
+            kwargs["iface"] = iface
             self._sniffer = AsyncSniffer(**kwargs)
             self._sniffer.start()
             self._running = True

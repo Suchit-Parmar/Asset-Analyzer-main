@@ -23,6 +23,7 @@ class FlowRecord:
     first_seen: datetime | None = None
     last_seen: datetime | None = None
     dns_name: str | None = None
+    tcp_flags: int = 0  # bitwise OR of observed TCP flags (metadata only)
 
     @property
     def duration(self) -> float:
@@ -84,6 +85,8 @@ class FlowAggregator:
 
             if ev.dns_name and not flow.dns_name:
                 flow.dns_name = ev.dns_name
+            if ev.tcp_flags is not None:
+                flow.tcp_flags |= int(ev.tcp_flags)
 
     def flush(self) -> list[FlowRecord]:
         out = list(self.flows.values())

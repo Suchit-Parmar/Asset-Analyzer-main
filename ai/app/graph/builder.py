@@ -25,11 +25,12 @@ NODE_FEATURE_DIM = 16
 
 # Canonical names for the 16-dim endpoint node vector produced by
 # ``_extract_node_features`` (dims 0–7 active; 8–15 reserved/zero-filled).
+# Dim 3 is auth-port short-flow bursts derived from traffic only (never from labels).
 ENDPOINT_FEATURE_NAMES: list[str] = [
     "log_packets",
     "log_bytes",
     "log_connections",
-    "log_failed_logins",
+    "log_auth_port_bursts",
     "log_port_count",
     "node_type",
     "log_avg_bytes",
@@ -43,6 +44,10 @@ ENDPOINT_FEATURE_NAMES: list[str] = [
     "reserved_15",
     "reserved_16",
 ]
+
+# Destination ports commonly used for interactive auth; short bursts are observable
+# without knowing the ground-truth attack label.
+_AUTH_PORTS = frozenset({21, 22, 23, 3389, 5900, 2222})
 
 # Indices 8–15 are intentionally zero-padded during training and live inference.
 ENDPOINT_RESERVED_INDICES: tuple[int, ...] = tuple(range(8, NODE_FEATURE_DIM))
@@ -238,7 +243,10 @@ class TemporalGraphBuilder:
             nodes[dst_id]["bytes"] += int(dst_bytes[i])
             nodes[dst_id]["connections"] += 1
 
-            if attack_votes and attack_votes[i] in ("Brute Force", "FTP-Patator", "SSH-Patator"):
+            # Label-free auth burst signal: short flows to auth ports (observable
+            # traffic only). NEVER derive this from ground-truth attack labels.
+            flow_pkts = int(src_packets[i]) + int(dst_packets[i])
+            if dst_port in _AUTH_PORTS and float(durations[i]) < 1.0 and flow_pkts <= 8:
                 nodes[dst_id]["failed_logins"] += 1
 
             edges.append({
@@ -248,9 +256,10 @@ class TemporalGraphBuilder:
                 "src_port": src_port,
                 "dst_port": dst_port,
                 "bytes": int(src_bytes[i]) + int(dst_bytes[i]),
-                "packets": int(src_packets[i]) + int(dst_packets[i]),
+                "packets": flow_pkts,
                 "duration": float(durations[i]),
                 "timestamp": ts_iso,
+                # attack_type on edges is metadata/target context only — not a node feature.
                 "attack_type": attack_votes[i] if attack_votes else "Normal",
             })
 

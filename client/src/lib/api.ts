@@ -966,14 +966,15 @@ class ApiClient {
     });
   }
 
-  reportDownloadUrl(format: "csv" | "html" | "json", modelId?: string) {
-    const qs = new URLSearchParams({ format });
+  reportDownloadUrl(format: "csv" | "html" | "json" | "pdf", modelId?: string) {
+    // Backend serves print-ready HTML for both html and pdf.
+    const qs = new URLSearchParams({ format: format === "pdf" ? "html" : format });
     if (modelId) qs.set("model_id", modelId);
     return `${API_BASE}/api/reports/evaluation?${qs}`;
   }
 
   /** Authenticated report download (bare <a href> fails with 401). */
-  async downloadReport(format: "csv" | "html" | "json", modelId?: string): Promise<void> {
+  async downloadReport(format: "csv" | "html" | "json" | "pdf", modelId?: string): Promise<void> {
     const url = this.reportDownloadUrl(format, modelId);
     const headers: Record<string, string> = {};
     if (this.accessToken) headers.Authorization = `Bearer ${this.accessToken}`;
@@ -993,19 +994,44 @@ class ApiClient {
 
     const blob = await response.blob();
     const objectUrl = URL.createObjectURL(blob);
+
+    const triggerDownload = (filename: string) => {
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    };
+
     if (format === "html") {
       window.open(objectUrl, "_blank", "noopener,noreferrer");
-      // Revoke after the new tab has a chance to load.
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
       return;
     }
 
-    const a = document.createElement("a");
-    a.href = objectUrl;
-    a.download = `evaluation-report.${format}`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    if (format === "pdf") {
+      // Save the print-ready report to disk, then open the system print dialog
+      // so the user can choose "Save as PDF".
+      triggerDownload("evaluation-report.html");
+      const printWindow = window.open(objectUrl, "_blank", "noopener,noreferrer");
+      if (printWindow) {
+        const tryPrint = () => {
+          try {
+            printWindow.focus();
+            printWindow.print();
+          } catch {
+            /* popup blockers / timing — file download still succeeded */
+          }
+        };
+        printWindow.addEventListener("load", tryPrint);
+        window.setTimeout(tryPrint, 750);
+      }
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 120_000);
+      return;
+    }
+
+    triggerDownload(`evaluation-report.${format}`);
     URL.revokeObjectURL(objectUrl);
   }
 
